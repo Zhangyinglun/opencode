@@ -18,6 +18,7 @@ import { WorktreeDirectory } from "@opencode/core/worktree/directory"
 import { WorktreeTable } from "@opencode/core/worktree/sql"
 import { WorktreeGit } from "@opencode/core/worktree/git"
 import { Location } from "@opencode/core/location"
+import type { Instance } from "@opencode/core/instance"
 import { LocationServiceMap, type LocationServices } from "@opencode/core/location-services"
 import { Global } from "@opencode/util/global"
 import { FSUtil } from "@opencode/util/fs-util"
@@ -126,7 +127,7 @@ const cachedLocations = Effect.fnUntraced(function* () {
           ),
           () => Effect.sync(() => released.push(ref.directory)),
         ),
-      ) as unknown as Layer.Layer<LocationServices>,
+      ) as unknown as Layer.Layer<LocationServices, Instance.Error>,
     { idleTimeToLive: Duration.infinity },
   )
   const context = yield* Layer.build(
@@ -184,7 +185,9 @@ function stored(projectID: Project.ID) {
       .all()
       .pipe(
         Effect.orDie,
-        Effect.map((rows) => rows.toSorted((a, b) => a.directory.localeCompare(b.directory))),
+        Effect.map((rows): Array<{ directory: AbsolutePath; strategy: string | null }> =>
+          rows.toSorted((a, b) => a.directory.localeCompare(b.directory)),
+        ),
       ),
   )
 }
@@ -715,7 +718,11 @@ describe("Worktree", () => {
       yield* Effect.addFinalizer(() => Effect.promise(() => fs.rm(unavailable, { recursive: true, force: true })))
       yield* input.db
         .insert(WorktreeTable)
-        .values({ project_id: input.projectID, directory: unavailable, strategy: "acme/missing" })
+        .values({
+          project_id: input.projectID,
+          directory: unavailable,
+          strategy: Worktree.StrategyID.make("acme/missing"),
+        })
         .run()
         .pipe(Effect.orDie)
 
@@ -823,7 +830,7 @@ describe("Worktree", () => {
         .insert(WorktreeTable)
         .values([
           { project_id: input.projectID, directory: target },
-          { project_id: input.projectID, directory: unchanged, strategy: "git" },
+          { project_id: input.projectID, directory: unchanged, strategy: Worktree.StrategyID.make("git") },
         ])
         .run()
         .pipe(Effect.orDie)

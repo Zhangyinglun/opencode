@@ -1,4 +1,4 @@
-import { Effect, Schema } from "effect"
+import { Effect, Schema, SchemaGetter } from "effect"
 import { Framing } from "../route/framing.js"
 import { MediaProtocol } from "../route/media-protocol.js"
 import { MediaRoute } from "../route/media.js"
@@ -28,6 +28,16 @@ export type Request = SpeechRequestFor<OpenAISpeechOptions>
 // 3. Streaming event schema
 // ---------------------------------------------------------------------------
 
+const EVENT_TYPES = new Set(["speech.audio.delta", "speech.audio.done"])
+/** OpenAI may add stream event types; frames outside `EVENT_TYPES` are ignored, while a malformed known type still fails decoding. */
+const UnknownEvent = Schema.Struct({
+  type: Schema.String.check(Schema.makeFilter((type) => !EVENT_TYPES.has(type))),
+}).pipe(
+  Schema.decodeTo(Schema.Struct({ type: Schema.Literal("unknown"), rawType: Schema.String }), {
+    decode: SchemaGetter.transform((event) => ({ type: "unknown" as const, rawType: event.type })),
+    encode: SchemaGetter.forbidden(() => "Unknown OpenAI Speech stream events are decode-only"),
+  }),
+)
 const SpeechStreamEvent = Schema.Union([
   Schema.Struct({ type: Schema.Literal("speech.audio.delta"), audio: Schema.Uint8ArrayFromBase64 }),
   Schema.Struct({
@@ -40,6 +50,7 @@ const SpeechStreamEvent = Schema.Union([
       }),
     ),
   }),
+  UnknownEvent,
 ])
 
 const decodeEvent = route.decodeFrame(SpeechStreamEvent)
@@ -60,7 +71,17 @@ interface State extends SpeechStream.Audio {
 // `sse` is not supported for `tts-1` or `tts-1-hd`; those models stream the raw audio body instead.
 const supportsSse = (model: string) => !/^tts-1(-hd)?(-|$)/.test(model)
 
+const FORMATS = new Set(["mp3", "opus", "aac", "flac", "wav", "pcm"])
+
 const fromRequest = Effect.fn("OpenAISpeech.fromRequest")(function* (request: MediaProtocol.Addressed<Request>) {
+  // Not in `unsupported`: that list would also reject `timestamps: false`, which asks for nothing.
+  if (request.timestamps === true)
+    return yield* route.unsupported("media.timestamps", `${route.name} does not return timestamps`)
+  if (request.format !== undefined && !FORMATS.has(request.format))
+    return yield* route.unsupported(
+      "media.format",
+      `${route.name} supports the mp3, opus, aac, flac, wav, and pcm formats, not "${request.format}"`,
+    )
   return MediaProtocol.json(
     mergeJsonRecords(
       {
@@ -84,8 +105,9 @@ const fromRequest = Effect.fn("OpenAISpeech.fromRequest")(function* (request: Me
 
 const isSse = (body: MediaProtocol.Body) => body.type === "json" && body.value.stream_format === "sse"
 
-const onEvent = Effect.fn("OpenAISpeech.onEvent")(function* (state: State, frame: string) {
+const onEvent = Effect.fnUntraced(function* (state: State, frame: string) {
   const event = yield* decodeEvent(frame)
+  if (event.type === "unknown") return [state, []] as const
   if (event.type === "speech.audio.delta") return SpeechStream.delta(state, event.audio)
   const usage = event.usage
   return [
@@ -109,7 +131,9 @@ const onEvent = Effect.fn("OpenAISpeech.onEvent")(function* (state: State, frame
 
 const finish = (state: State, context: MediaProtocol.ResponseContext<Request>) => {
   if (isSse(context.body) && !state.done) return Effect.fail(route.incomplete())
-  const format = context.request.format ?? "mp3"
+  // The sent body reflects `providerOptions` and `http.body` overrides of `format`.
+  const sent = context.body.type === "json" ? context.body.value.response_format : undefined
+  const format = typeof sent === "string" ? sent : "mp3"
   return SpeechStream.finish(route, state, {
     ...(format === "pcm" ? SpeechStream.pcm("pcm_s16le", PCM_SAMPLE_RATE) : SpeechStream.container(format)),
     usage: state.usage,
@@ -121,7 +145,7 @@ const finish = (state: State, context: MediaProtocol.ResponseContext<Request>) =
 // ---------------------------------------------------------------------------
 
 export const protocol = MediaProtocol.stream<Request, SpeechEvent, string | Uint8Array, State>(route, {
-  unsupported: ["language", "timestamps"],
+  unsupported: ["language"],
   body: { from: fromRequest },
   frames: (bytes, context) => (isSse(context.body) ? Framing.sse.frame(bytes) : bytes),
   initial: () => ({ chunks: [], done: false }),

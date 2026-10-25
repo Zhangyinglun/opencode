@@ -10,14 +10,19 @@ const WebSearch = Schema.Struct({
   name: Schema.Literal("web_search"),
   user_location: MetaResponses.WebSearch.fields.user_location,
 })
+const MetaCacheControl = Schema.Struct({
+  type: Schema.tag("ephemeral"),
+  ttl: Schema.optional(Schema.Literals(["5m", "1h"])),
+})
+const FunctionTool = Schema.Struct({
+  name: Schema.String,
+  description: Schema.String,
+  input_schema: JsonObject,
+  cache_control: Schema.optional(MetaCacheControl),
+})
 const Body = Schema.Struct({
   ...AnthropicMessages.AnthropicMessagesBody.fields,
-  tools: optionalArray(
-    Schema.Union([
-      Schema.Struct({ name: Schema.String, description: Schema.String, input_schema: JsonObject }),
-      WebSearch,
-    ]),
-  ),
+  tools: optionalArray(Schema.Union([FunctionTool, WebSearch])),
 })
 
 const fromRequest = Effect.fn("MetaMessages.fromRequest")(function* (request: LLMRequest) {
@@ -25,6 +30,16 @@ const fromRequest = Effect.fn("MetaMessages.fromRequest")(function* (request: LL
   const body = yield* AnthropicMessages.protocol.body.from(projected.request)
   return {
     ...body,
+    messages: body.messages.map((message) => {
+      if (message.role !== "user") return message
+      const videos: Array<(typeof message.content)[number]> = []
+      const content = message.content.map((block) => {
+        if (block.type !== "tool_result" || typeof block.content === "string") return block
+        videos.push(...block.content.filter((item) => item.type === "video"))
+        return { ...block, content: block.content.filter((item) => item.type !== "video") }
+      })
+      return videos.length === 0 ? message : { ...message, content: [...content, ...videos] }
+    }),
     tools:
       body.tools === undefined
         ? undefined

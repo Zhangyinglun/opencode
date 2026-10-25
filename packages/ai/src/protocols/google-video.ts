@@ -1,5 +1,5 @@
 import { Duration, Effect, Schema } from "effect"
-import type { HttpClientResponse } from "effect/unstable/http"
+import type { HttpClientResponse } from "effect/http"
 import type { Status } from "../generation.js"
 import { Media } from "../media.js"
 import { MediaProtocol } from "../route/media-protocol.js"
@@ -17,7 +17,7 @@ const FILE_RETENTION = Duration.days(2)
 // 1. Public model input
 // ---------------------------------------------------------------------------
 
-/** Provider-native `parameters`. Common fields (`aspectRatio`, `resolution`, `durationSeconds`, `seed`) live on the request. */
+/** Provider-native `parameters`. Common fields (`aspect`, `resolution`, `durationSeconds`, `seed`) live on the request. */
 export type GoogleVideoOptions = {
   readonly personGeneration?: OpenString<"allow_all" | "allow_adult" | "dont_allow">
 } & Record<string, unknown>
@@ -36,7 +36,9 @@ const StartResponse = Schema.Struct({ name: Schema.String })
 
 const Operation = Schema.Struct({
   done: Schema.optional(Schema.Boolean),
-  error: Schema.optional(Schema.Struct({ message: Schema.optional(Schema.String) })),
+  error: Schema.optional(
+    Schema.Struct({ code: Schema.optional(Schema.Number), message: Schema.optional(Schema.String) }),
+  ),
   response: Schema.optional(
     Schema.Struct({
       generateVideoResponse: Schema.optional(
@@ -59,6 +61,16 @@ const Operation = Schema.Struct({
   ),
   metadata: Schema.optional(Schema.Unknown),
 })
+
+// Operation errors are `google.rpc.Status`; unlisted codes (INTERNAL, UNAVAILABLE, ...) are provider-side.
+const FAILURE = {
+  3: "InvalidRequest", // INVALID_ARGUMENT
+  7: "Authentication", // PERMISSION_DENIED
+  8: "RateLimit", // RESOURCE_EXHAUSTED
+  9: "InvalidRequest", // FAILED_PRECONDITION
+  11: "InvalidRequest", // OUT_OF_RANGE
+  16: "Authentication", // UNAUTHENTICATED
+} as const satisfies Record<number, MediaProtocol.Failure>
 
 // ---------------------------------------------------------------------------
 // 5. Request body construction
@@ -103,7 +115,7 @@ const fromRequest = Effect.fn("GoogleVideo.fromRequest")(function* (request: Req
         ],
         parameters: mergeJsonRecords(
           {
-            aspectRatio: request.aspectRatio,
+            aspectRatio: request.aspect,
             resolution: request.resolution,
             durationSeconds: request.durationSeconds,
             negativePrompt: request.negativePrompt,
@@ -149,12 +161,12 @@ const decodeResult = Effect.fn("GoogleVideo.decodeResult")(function* (
   const output = yield* decodeOperation(response)
   const operation = output.value
   const status = statusOf(operation)
-  if (status === "running")
-    return yield* output.invalid(`${route.name} operation ${context.token.operation} has not finished`)
+  if (status === "running") return yield* output.pending(context.token.operation)
   if (status === "failed")
     return yield* output.ended(
       "failed",
       `${route.name} operation failed${operation.error?.message === undefined ? "" : `: ${operation.error.message}`}`,
+      MediaProtocol.failure(FAILURE, operation.error?.code),
     )
   const generated = operation.response?.generateVideoResponse
   // Downloads require the same API key as the poll; the asset carries it transiently and follows the redirect.

@@ -1,5 +1,5 @@
 import { Effect, Schema } from "effect"
-import type { HttpClientResponse } from "effect/unstable/http"
+import type { HttpClientResponse } from "effect/http"
 import type { Status } from "../generation.js"
 import { Media } from "../media.js"
 import { MediaProtocol } from "../route/media-protocol.js"
@@ -20,7 +20,7 @@ export const STATUS_PATH = "/videos"
 // ---------------------------------------------------------------------------
 
 /**
- * Provider-native options. Common fields (`frames`, `references`, `video`, `durationSeconds`, `aspectRatio`,
+ * Provider-native options. Common fields (`frames`, `references`, `video`, `durationSeconds`, `aspect`,
  * `resolution`, `audio`) live on the request. `mode` selects the endpoint a `video` input is sent to.
  */
 export type XAIVideoOptions = {
@@ -65,6 +65,13 @@ const STATUS = {
   expired: "expired",
 } as const satisfies Record<string, Status>
 
+// Documented video error codes; `service_unavailable`, `internal_error`, and unknown codes are provider-side.
+const FAILURE = {
+  invalid_argument: "InvalidRequest",
+  failed_precondition: "InvalidRequest",
+  permission_denied: "Authentication",
+} as const satisfies Record<string, MediaProtocol.Failure>
+
 // ---------------------------------------------------------------------------
 // 5. Request body construction
 // ---------------------------------------------------------------------------
@@ -95,7 +102,7 @@ const fromRequest = Effect.fn("XAIVideo.fromRequest")(function* (request: Reques
         reference_images: references.length === 0 ? undefined : references,
         video,
         duration: request.durationSeconds,
-        aspect_ratio: request.aspectRatio,
+        aspect_ratio: request.aspect,
         resolution: request.resolution,
         generate_audio: request.audio,
       },
@@ -136,14 +143,14 @@ const decodeResult = Effect.fn("XAIVideo.decodeResult")(function* (
   const output = yield* decodeVideoStatus(response)
   const decoded = output.value
   const status = yield* MediaProtocol.status(STATUS, decoded.status, output)
-  if (status === "running")
-    return yield* output.invalid(`${route.name} request ${context.token.requestID} has not finished`)
+  if (status === "running") return yield* output.pending(context.token.requestID)
   if (status === "failed") {
     const code = decoded.error?.code ?? undefined
     const message = decoded.error?.message ?? undefined
     return yield* output.ended(
       "failed",
       `${route.name} generation failed${code === undefined ? "" : ` (${code})`}${message === undefined ? "" : `: ${message}`}`,
+      MediaProtocol.failure(FAILURE, code),
     )
   }
   if (status !== "completed")

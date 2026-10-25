@@ -1,6 +1,6 @@
 import { Config, Effect, Formatter, Schema, Stream } from "effect"
 import { NodeFileSystem } from "@effect/platform-node"
-import { AIClient, Image, LLM, LLMRequest, Media, Message, ProviderID, Tool, ToolRuntime } from "@opencode/ai"
+import { AIClient, Image, LLM, LLMRequest, Media, Message, ProviderID, Tool, ToolRuntime } from "@opencode/ai/effect"
 import { Route, Auth, Endpoint, Framing, Protocol } from "@opencode/ai/route"
 import { OpenAI } from "@opencode/ai/providers"
 
@@ -15,7 +15,7 @@ import { OpenAI } from "@opencode/ai/providers"
  * hover imports and local values to see how the public API is typed.
  */
 
-const apiKey = Config.redacted("OPENAI_API_KEY")
+const apiKey = Config.Redacted("OPENAI_API_KEY")
 
 // 1. Configure a provider. The configured facade records provider identity,
 // deployment options, authentication, and defaults. Per-modality selectors pick
